@@ -14,8 +14,13 @@
       <span id="permStatus" style="margin-left:8px">権限: 不明</span>
     </div>
 
-    <label>入力デバイス: <select id="micSelect"></select></label>
-    <label style="margin-left:12px"><input type="checkbox" id="emit" /> ローカル再生（Emit voice）</label>
+    <div style="margin-top:12px">
+      <label>モード: <select id="modeSelect"><option value="mic">Mic</option><option value="speaker">Speaker</option></select></label>
+    </div>
+    <div style="margin-top:12px">
+      <label>入力デバイス: <select id="micSelect"></select></label>
+      <label style="margin-left:12px"><input type="checkbox" id="emit" /> ローカル再生（Emit voice）</label>
+    </div>
     <div style="margin-top:12px">
       <button id="start">開始</button>
       <button id="stop" disabled>停止</button>

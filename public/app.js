@@ -2,6 +2,7 @@
   const status = document.getElementById('status');
   const startBtn = document.getElementById('start');
   const stopBtn = document.getElementById('stop');
+  const modeSelect = document.getElementById('modeSelect');
   const micSelect = document.getElementById('micSelect');
   const emitCheckbox = document.getElementById('emit');
   const volumeInput = document.getElementById('volume');
@@ -11,6 +12,7 @@
   const requestPermBtn = document.getElementById('requestPerm');
   const permStatus = document.getElementById('permStatus');
   let audioCtx, processor, source, stream, ws, analyser, gainNode, drawId, monitorConnected = false;
+  let speakerSource;
 
   function floatTo16BitPCM(float32Array) {
     const l = float32Array.length;
@@ -103,6 +105,44 @@
       ws.binaryType = 'arraybuffer';
       ws.onopen = async () => {
         status.textContent = 'WebSocket 接続済み';
+        const mode = modeSelect.value;
+        ws.send(mode);
+
+        if (mode === 'speaker') {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          gainNode = audioCtx.createGain();
+          gainNode.gain.value = parseFloat(volumeInput.value);
+          gainNode.connect(audioCtx.destination);
+
+          const bufferQueue = [];
+          let sourceNode = null;
+
+          ws.onmessage = (event) => {
+            if (!(event.data instanceof ArrayBuffer)) return;
+            const float32 = new Float32Array(event.data.byteLength / 2);
+            const view = new DataView(event.data);
+            for (let i = 0; i < float32.length; i++) {
+              const s = view.getInt16(i * 2, true);
+              float32[i] = s / 0x7fff;
+            }
+            bufferQueue.push(float32);
+            if (!sourceNode) {
+              sourceNode = audioCtx.createBufferSource();
+              const buffer = audioCtx.createBuffer(1, float32.length, audioCtx.sampleRate);
+              buffer.copyToChannel(float32, 0);
+              sourceNode.buffer = buffer;
+              sourceNode.connect(gainNode);
+              sourceNode.start();
+              sourceNode.onended = () => { sourceNode = null; };
+            }
+          };
+
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+          status.textContent = 'Speaker mode ready';
+          return;
+        }
+
         const constraints = { audio: {} };
         const deviceId = micSelect.value;
         if (deviceId) constraints.audio.deviceId = { exact: deviceId };
@@ -124,16 +164,13 @@
           const pcm = floatTo16BitPCM(input);
           if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
         };
-        // processor は分析のためソースへ接続（出力は使わない）
         source.connect(processor);
-        processor.connect(audioCtx.destination); // 必要ないが ScriptProcessor が止まらないように一旦接続
+        processor.connect(audioCtx.destination);
 
-        // モニター（ローカル再生）の切替
         if (emitCheckbox.checked) {
           try { gainNode.connect(audioCtx.destination); monitorConnected = true; } catch (e) { console.warn(e); }
         }
 
-        // 可視化ループ
         const bufferLength = analyser.fftSize;
         const dataArray = new Uint8Array(bufferLength);
         function draw() {
@@ -175,6 +212,7 @@
     if (analyser) { try { analyser.disconnect(); } catch {} analyser = null; }
     if (processor) { try { processor.disconnect(); } catch {} processor.onaudioprocess = null; processor = null; }
     if (source) { try { if (monitorConnected) source.disconnect(audioCtx.destination); source.disconnect(); } catch {} source = null; }
+    if (speakerSource) { try { speakerSource.disconnect(); } catch {} speakerSource = null; }
     if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; }
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     if (ws && ws.readyState === WebSocket.OPEN) ws.close();

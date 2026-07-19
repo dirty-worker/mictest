@@ -56,8 +56,12 @@ function cleanupVirtualSink() {
     for (const line of lines) {
       const parts = line.split('\t');
       const index = parts[0];
-      const args = parts[1] || '';
-      if (args.includes(`sink_name=${AUDIO_SINK_NAME}`) || args.includes(`device.description=VirtualMic`)) {
+      const moduleName = parts[1] || '';
+      const args = parts.slice(2).join('\t');
+      if (
+        moduleName === 'module-null-sink' &&
+        (args.includes(`sink_name=${AUDIO_SINK_NAME}`) || args.includes('device.description=VirtualMic'))
+      ) {
         console.log(`Unload existing virtual mic module ${index}`);
         runCmd('pactl', ['unload-module', index]);
       }
@@ -99,8 +103,26 @@ function createSpeakerMonitor() {
   }
 }
 
+function cleanupOnExit() {
+  process.on('SIGINT', () => {
+    console.log('SIGINT received, cleaning up virtual mic');
+    cleanupVirtualSink();
+    process.exit(0);
+  });
+  process.on('SIGTERM', () => {
+    console.log('SIGTERM received, cleaning up virtual mic');
+    cleanupVirtualSink();
+    process.exit(0);
+  });
+  process.on('exit', () => {
+    console.log('Process exiting, cleaning up virtual mic');
+    cleanupVirtualSink();
+  });
+}
+
 createVirtualSink();
 createSpeakerMonitor();
+cleanupOnExit();
 
 const fifoStream = fs.createWriteStream(FIFO);
 const speakerClients = new Set();
@@ -127,37 +149,63 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocket.Server({ noServer: true });
-const speakerWss = new WebSocket.Server({ noServer: true });
 
 server.on('upgrade', (request, socket, head) => {
-  const { url } = request;
-  if (url === '/speaker') {
-    speakerWss.handleUpgrade(request, socket, head, (ws) => {
-      speakerWss.emit('connection', ws, request);
-    });
-  } else {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
-    });
-  }
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit('connection', ws, request);
+  });
 });
 
 wss.on('connection', (ws, req) => {
-  console.log('Client connected', req.socket.remoteAddress);
+  console.log('WebSocket connected', req.socket.remoteAddress);
+  let role = 'unknown';
+
   ws.on('message', (message) => {
-    if (!Buffer.isBuffer(message)) message = Buffer.from(message);
-    fifoStream.write(message);
+    const isString = typeof message === 'string' || message instanceof String;
+    if (role === 'unknown' && isString) {
+      const text = message.toString();
+      if (text === 'speaker') {
+        role = 'speaker';
+        speakerClients.add(ws);
+        console.log('Speaker client registered', req.socket.remoteAddress);
+        return;
+      }
+      if (text === 'mic') {
+        role = 'mic';
+        console.log('Mic client registered', req.socket.remoteAddress);
+        return;
+      }
+    }
+
+    if (role === 'unknown') {
+      role = 'mic';
+      console.log('Mic client implicitly registered', req.socket.remoteAddress);
+    }
+
+    if (role === 'mic') {
+      if (!Buffer.isBuffer(message)) message = Buffer.from(message);
+      fifoStream.write(message);
+    }
   });
-  ws.on('close', () => console.log('Client disconnected'));
+
+  ws.on('close', () => {
+    if (role === 'speaker') {
+      speakerClients.delete(ws);
+      console.log('Speaker client disconnected', req.socket.remoteAddress);
+    } else {
+      console.log('Client disconnected', req.socket.remoteAddress);
+    }
+  });
 });
 
-speakerWss.on('connection', (ws, req) => {
-  console.log('Speaker client connected', req.socket.remoteAddress);
-  speakerClients.add(ws);
-  ws.on('close', () => {
-    speakerClients.delete(ws);
-    console.log('Speaker client disconnected');
-  });
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} already in use. Server cannot start.`);
+  } else {
+    console.error('Server error:', err);
+  }
+  cleanupVirtualSink();
+  process.exit(1);
 });
 
 server.listen(PORT, '0.0.0.0', () => {
