@@ -9,8 +9,16 @@
   <body>
     <h1>マイク入力を送信</h1>
     <p id="status">準備完了</p>
-    <button id="start">開始</button>
-    <button id="stop" disabled>停止</button>
+
+    <label>入力デバイス: <select id="micSelect"></select></label>
+    <label style="margin-left:12px"><input type="checkbox" id="emit" /> ローカル再生（Emit voice）</label>
+    <div style="margin-top:12px">
+      <button id="start">開始</button>
+      <button id="stop" disabled>停止</button>
+    </div>
+
+    <h3>可視化</h3>
+    <canvas id="viz" width="600" height="100" style="border:1px solid #ddd"></canvas>
 
     <script src="/app.js"></script>
   </body>

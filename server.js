@@ -14,6 +14,21 @@ if (!fs.existsSync(FIFO)) {
 
 const fifoStream = fs.createWriteStream(FIFO);
 
+// --- 自動起動: FIFO を tail して再生コマンドを子プロセスで起動する ---
+const { spawn } = require('child_process');
+// 環境変数 AUDIO_CMD でコマンドを上書きできます。デフォルトは tail -> paplay の例。
+const AUDIO_CMD = process.env.AUDIO_CMD || `tail -f ${FIFO} | paplay --device=virtual_mic --raw --format=s16le --rate=48000 --channels=1`;
+try {
+  const audioProc = spawn('sh', ['-c', AUDIO_CMD], { cwd: __dirname });
+  audioProc.stdout.on('data', (d) => console.log('[audio-cmd stdout]', d.toString()));
+  audioProc.stderr.on('data', (d) => console.error('[audio-cmd stderr]', d.toString()));
+  audioProc.on('exit', (code, sig) => console.log(`[audio-cmd] exited code=${code} signal=${sig}`));
+  console.log('[audio-cmd] started:', AUDIO_CMD);
+} catch (err) {
+  console.error('Failed to start audio command:', err);
+}
+// ------------------------------------------------------------------
+
 const publicDir = path.join(__dirname, 'public');
 
 const server = http.createServer((req, res) => {

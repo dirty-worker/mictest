@@ -40,3 +40,31 @@ ffplay -f s16le -ar 48000 -ac 1 /tmp/audio_fifo
 注意点:
 - ブラウザはセキュアコンテキスト（localhost を含む）で getUserMedia が動作します。
 - 送信されるデータは 16bit リトルエンディアン PCM（モノラル）です。再生側はサンプルレートを合わせてください。
+
+自動で再生コマンドを起動する
+-------------------------------------------------
+サーバー起動時に `tail -f` と再生コマンド（`paplay` など）を子プロセスとして自動で起動することができます。これにより別ターミナルで `tail -f` を実行する手間が不要になります。
+
+デフォルトではサーバーは次のコマンドを実行します（必要に応じて環境変数 `AUDIO_CMD` で上書きできます）:
+
+```sh
+tail -f /tmp/audio_fifo | paplay --device=virtual_mic --raw --format=s16ne --rate=48000 --channels=1
+```
+
+起動例:
+
+```bash
+# FIFO を作成
+mkfifo /tmp/audio_fifo
+
+# 必要パッケージをインストール
+npm install ws
+
+# 環境変数でコマンドを変更する例（任意）
+export AUDIO_CMD="tail -f /tmp/audio_fifo | ffplay -f s16le -ar 48000 -ac 1 -"
+
+# サーバーを起動（デフォルトで AUDIO_CMD が実行されます）
+AUDIO_FIFO=/tmp/audio_fifo node server.js
+```
+
+エラー出力はサーバーのログに表示されます。
