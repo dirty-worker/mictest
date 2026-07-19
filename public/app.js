@@ -13,6 +13,8 @@
   const permStatus = document.getElementById('permStatus');
   let audioCtx, processor, source, stream, ws, analyser, gainNode, drawId, monitorConnected = false;
   let speakerSource;
+  let incomingSampleRate = null;
+  let incomingChannels = 1;
 
   function floatTo16BitPCM(float32Array) {
     const l = float32Array.length;
@@ -106,18 +108,42 @@
       ws.onopen = async () => {
         status.textContent = 'WebSocket 接続済み';
         const mode = modeSelect.value;
-        ws.send(mode);
+        const roles = mode === 'both' ? ['mic', 'speaker'] : [mode];
+        const speakerMode = roles.includes('speaker');
+        const micMode = roles.includes('mic');
 
-        if (mode === 'speaker') {
+        if ((speakerMode || micMode) && !audioCtx) {
           audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        ws.send(JSON.stringify({
+          action: 'register',
+          roles,
+          sampleRate: audioCtx ? audioCtx.sampleRate : 48000,
+          channels: 1
+        }));
+
+        if (speakerMode) {
+          if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
           gainNode = audioCtx.createGain();
           gainNode.gain.value = parseFloat(volumeInput.value);
           gainNode.connect(audioCtx.destination);
 
-          const bufferQueue = [];
           let sourceNode = null;
 
           ws.onmessage = (event) => {
+            if (typeof event.data === 'string') {
+              try {
+                const meta = JSON.parse(event.data);
+                if (meta && meta.action === 'format') {
+                  incomingSampleRate = meta.sampleRate;
+                  incomingChannels = meta.channels || 1;
+                }
+              } catch (e) {
+                // ignore non-JSON text
+              }
+              return;
+            }
             if (!(event.data instanceof ArrayBuffer)) return;
             const float32 = new Float32Array(event.data.byteLength / 2);
             const view = new DataView(event.data);
@@ -125,21 +151,25 @@
               const s = view.getInt16(i * 2, true);
               float32[i] = s / 0x7fff;
             }
-            bufferQueue.push(float32);
-            if (!sourceNode) {
-              sourceNode = audioCtx.createBufferSource();
-              const buffer = audioCtx.createBuffer(1, float32.length, audioCtx.sampleRate);
-              buffer.copyToChannel(float32, 0);
-              sourceNode.buffer = buffer;
-              sourceNode.connect(gainNode);
-              sourceNode.start();
-              sourceNode.onended = () => { sourceNode = null; };
+            const sampleRate = incomingSampleRate || audioCtx.sampleRate;
+            if (sourceNode) {
+              sourceNode.onended = null;
+              sourceNode = null;
             }
+            sourceNode = audioCtx.createBufferSource();
+            const buffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+            buffer.copyToChannel(float32, 0);
+            sourceNode.buffer = buffer;
+            sourceNode.connect(gainNode);
+            sourceNode.start();
+            sourceNode.onended = () => { sourceNode = null; };
           };
+        }
 
+        if (!micMode) {
           startBtn.disabled = true;
           stopBtn.disabled = false;
-          status.textContent = 'Speaker mode ready';
+          status.textContent = speakerMode ? 'Speaker mode ready' : '接続済み';
           return;
         }
 

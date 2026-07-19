@@ -103,33 +103,96 @@ function createSpeakerMonitor() {
   }
 }
 
+let fifoStream = null;
+let pipeProcess = null;
+let audioPipeSampleRate = 48000;
+let audioPipeChannels = 1;
+
+function openFifoStream() {
+  if (fifoStream) return fifoStream;
+  fifoStream = fs.createWriteStream(FIFO);
+  fifoStream.on('error', (err) => {
+    console.error('FIFO write stream error:', err.message || err);
+  });
+  return fifoStream;
+}
+
+function startAudioPipe() {
+  if (pipeProcess) return;
+  const rateArg = `--rate=${audioPipeSampleRate}`;
+  const channelsArg = `--channels=${audioPipeChannels}`;
+  if (commandExists('pacat')) {
+    const command = `exec pacat --raw ${channelsArg} ${rateArg} --format=s16le --playback --device='${AUDIO_SINK_NAME}' < '${FIFO}'`;
+    console.log(`Starting audio pipe using pacat (${audioPipeSampleRate}Hz, ${audioPipeChannels}ch)`);
+    pipeProcess = spawn('sh', ['-c', command], { stdio: ['ignore', 'ignore', 'inherit'] });
+  } else if (commandExists('pw-cat')) {
+    const args = ['--playback', '--raw', `--channels=${audioPipeChannels}`, `--rate=${audioPipeSampleRate}`, '--format=s16le', '--target', AUDIO_SINK_NAME, '-'];
+    console.log(`Starting audio pipe using pw-cat (${audioPipeSampleRate}Hz, ${audioPipeChannels}ch)`);
+    const fifoFd = fs.openSync(FIFO, 'r');
+    pipeProcess = spawn('pw-cat', args, { stdio: [fifoFd, 'ignore', 'inherit'] });
+  } else {
+    console.warn('No pw-cat or pacat available; virtual mic audio pipe will not be started.');
+    return;
+  }
+  pipeProcess.on('exit', (code, signal) => {
+    console.log(`Audio pipe process exited (${signal || code})`);
+    pipeProcess = null;
+  });
+  pipeProcess.on('error', (err) => {
+    console.warn('Audio pipe process failed:', err.message || err);
+    pipeProcess = null;
+  });
+}
+
+function stopAudioPipe() {
+  if (!pipeProcess) return;
+  try {
+    pipeProcess.kill('SIGTERM');
+  } catch (e) {
+    console.warn('Failed to stop audio pipe process:', e.message || e);
+  }
+  pipeProcess = null;
+}
+
 function cleanupOnExit() {
   process.on('SIGINT', () => {
     console.log('SIGINT received, cleaning up virtual mic');
+    stopAudioPipe();
     cleanupVirtualSink();
     process.exit(0);
   });
   process.on('SIGTERM', () => {
     console.log('SIGTERM received, cleaning up virtual mic');
+    stopAudioPipe();
     cleanupVirtualSink();
     process.exit(0);
   });
   process.on('exit', () => {
     console.log('Process exiting, cleaning up virtual mic');
+    stopAudioPipe();
     cleanupVirtualSink();
   });
 }
 
-createVirtualSink();
-createSpeakerMonitor();
 cleanupOnExit();
 
-const fifoStream = fs.createWriteStream(FIFO);
 const speakerClients = new Set();
 
-function broadcastSpeaker(data) {
+function broadcastSpeaker(data, excludeWs = null) {
   for (const ws of speakerClients) {
+    if (ws === excludeWs) continue;
     if (ws.readyState === WebSocket.OPEN) ws.send(data);
+  }
+}
+
+function broadcastFormat() {
+  const format = {
+    action: 'format',
+    sampleRate: audioPipeSampleRate,
+    channels: audioPipeChannels,
+  };
+  for (const ws of speakerClients) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(format));
   }
 }
 
@@ -158,43 +221,75 @@ server.on('upgrade', (request, socket, head) => {
 
 wss.on('connection', (ws, req) => {
   console.log('WebSocket connected', req.socket.remoteAddress);
-  let role = 'unknown';
+  const roles = { mic: false, speaker: false };
+  let registered = false;
+
+  function registerRoles(roleNames, sampleRate, channels) {
+    const list = Array.isArray(roleNames) ? roleNames : [roleNames];
+    if (typeof sampleRate === 'number' && sampleRate > 0) {
+      audioPipeSampleRate = sampleRate;
+    }
+    if (typeof channels === 'number' && channels > 0) {
+      audioPipeChannels = channels;
+    }
+    list.forEach((role) => {
+      if (role === 'speaker' && !roles.speaker) {
+        roles.speaker = true;
+        speakerClients.add(ws);
+        console.log('Speaker role registered', req.socket.remoteAddress);
+      }
+      if (role === 'mic' && !roles.mic) {
+        roles.mic = true;
+        console.log('Mic role registered', req.socket.remoteAddress);
+      }
+    });
+    registered = true;
+    if (roles.mic && !pipeProcess) {
+      startAudioPipe();
+    }
+    if (speakerClients.size > 0) {
+      broadcastFormat();
+    }
+  }
 
   ws.on('message', (message) => {
     const isString = typeof message === 'string' || message instanceof String;
-    if (role === 'unknown' && isString) {
+    if (isString) {
       const text = message.toString();
-      if (text === 'speaker') {
-        role = 'speaker';
-        speakerClients.add(ws);
-        console.log('Speaker client registered', req.socket.remoteAddress);
-        return;
+      try {
+        const data = JSON.parse(text);
+        if (data && data.action === 'register' && Array.isArray(data.roles)) {
+          registerRoles(data.roles, data.sampleRate, data.channels);
+          return;
+        }
+      } catch (e) {
+        // not JSON, continue
       }
-      if (text === 'mic') {
-        role = 'mic';
-        console.log('Mic client registered', req.socket.remoteAddress);
-        return;
+      if (!registered) {
+        if (text === 'speaker' || text === 'mic') {
+          registerRoles(text);
+          return;
+        }
       }
     }
 
-    if (role === 'unknown') {
-      role = 'mic';
-      console.log('Mic client implicitly registered', req.socket.remoteAddress);
+    if (!registered) {
+      registerRoles('mic');
     }
 
-    if (role === 'mic') {
+    if (roles.mic) {
       if (!Buffer.isBuffer(message)) message = Buffer.from(message);
-      fifoStream.write(message);
+      openFifoStream().write(message);
+      broadcastSpeaker(message, ws);
     }
   });
 
   ws.on('close', () => {
-    if (role === 'speaker') {
+    if (roles.speaker) {
       speakerClients.delete(ws);
       console.log('Speaker client disconnected', req.socket.remoteAddress);
-    } else {
-      console.log('Client disconnected', req.socket.remoteAddress);
     }
+    console.log('Client disconnected', req.socket.remoteAddress);
   });
 });
 
@@ -212,4 +307,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`HTTP+WS server listening on all interfaces at http://0.0.0.0:${PORT}`);
   console.log(`Use this machine IP to connect from other devices: http://<your-ip>:${PORT}`);
   console.log(`Writing audio data to FIFO: ${FIFO}`);
+  createVirtualSink();
+  createSpeakerMonitor();
 });
