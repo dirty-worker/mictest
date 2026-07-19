@@ -113,8 +113,16 @@ function openFifoStream() {
   fifoStream = fs.createWriteStream(FIFO);
   fifoStream.on('error', (err) => {
     console.error('FIFO write stream error:', err.message || err);
+    if (fifoStream) { try { fifoStream.destroy(); } catch (e) { /* ignore */ } }
+    fifoStream = null;
   });
   return fifoStream;
+}
+
+function closeFifoStream() {
+  if (!fifoStream) return;
+  try { fifoStream.destroy(); } catch (e) { /* ignore */ }
+  fifoStream = null;
 }
 
 function startAudioPipe() {
@@ -145,6 +153,7 @@ function startAudioPipe() {
 }
 
 function stopAudioPipe() {
+  closeFifoStream();
   if (!pipeProcess) return;
   try {
     pipeProcess.kill('SIGTERM');
