@@ -226,10 +226,12 @@ wss.on('connection', (ws, req) => {
 
   function registerRoles(roleNames, sampleRate, channels) {
     const list = Array.isArray(roleNames) ? roleNames : [roleNames];
-    if (typeof sampleRate === 'number' && sampleRate > 0) {
+    const rateChanged = typeof sampleRate === 'number' && sampleRate > 0 && sampleRate !== audioPipeSampleRate;
+    const channelsChanged = typeof channels === 'number' && channels > 0 && channels !== audioPipeChannels;
+    if (rateChanged) {
       audioPipeSampleRate = sampleRate;
     }
-    if (typeof channels === 'number' && channels > 0) {
+    if (channelsChanged) {
       audioPipeChannels = channels;
     }
     list.forEach((role) => {
@@ -244,6 +246,10 @@ wss.on('connection', (ws, req) => {
       }
     });
     registered = true;
+    if (roles.mic && (rateChanged || channelsChanged) && pipeProcess) {
+      console.log(`Audio format changed (${audioPipeSampleRate}Hz, ${audioPipeChannels}ch); restarting audio pipe`);
+      stopAudioPipe();
+    }
     if (roles.mic && !pipeProcess) {
       startAudioPipe();
     }
