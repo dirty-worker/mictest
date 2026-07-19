@@ -14,22 +14,14 @@
   const speakerPlaybackCheckbox = document.getElementById('speakerPlayback');
   const requestPermBtn = document.getElementById('requestPerm');
   const permStatus = document.getElementById('permStatus');
-  let audioCtx, processor, source, stream, ws, analyser, gainNode, drawId, monitorConnected = false;
+  let audioCtx, recorder, source, stream, ws, analyser, gainNode, drawId, monitorConnected = false;
   let speakerSource;
   let analyserSpeaker, speakerDrawId;
   let incomingSampleRate = null;
   let incomingChannels = 1;
 
-  function floatTo16BitPCM(float32Array) {
-    const l = float32Array.length;
-    const buffer = new ArrayBuffer(l * 2);
-    const view = new DataView(buffer);
-    for (let i = 0; i < l; i++) {
-      let s = Math.max(-1, Math.min(1, float32Array[i]));
-      view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    }
-    return buffer;
-  }
+  const MIC_MIME_TYPE = ['audio/webm;codecs=opus', 'audio/webm']
+    .find((type) => window.MediaRecorder && MediaRecorder.isTypeSupported(type));
 
   function getWsUrl() {
     const loc = window.location;
@@ -120,12 +112,7 @@
           audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         }
 
-        ws.send(JSON.stringify({
-          action: 'register',
-          roles,
-          sampleRate: audioCtx ? audioCtx.sampleRate : 48000,
-          channels: 1
-        }));
+        ws.send(JSON.stringify({ action: 'register', roles }));
 
         if (speakerMode) {
           if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -219,14 +206,13 @@
         source.connect(analyser);
         source.connect(gainNode);
 
-        processor = audioCtx.createScriptProcessor(4096, 1, 1);
-        processor.onaudioprocess = (e) => {
-          const input = e.inputBuffer.getChannelData(0);
-          const pcm = floatTo16BitPCM(input);
-          if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
+        if (!MIC_MIME_TYPE) throw new Error('MediaRecorder does not support Opus/WebM in this browser');
+        recorder = new MediaRecorder(stream, { mimeType: MIC_MIME_TYPE });
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0 && ws.readyState === WebSocket.OPEN) ws.send(e.data);
         };
-        source.connect(processor);
-        processor.connect(audioCtx.destination);
+        recorder.onerror = (e) => console.error('MediaRecorder error', e.error || e);
+        recorder.start(200);
 
         if (emitCheckbox.checked) {
           try { gainNode.connect(audioCtx.destination); monitorConnected = true; } catch (e) { console.warn(e); }
@@ -273,7 +259,7 @@
     if (speakerDrawId) { cancelAnimationFrame(speakerDrawId); speakerDrawId = null; }
     if (analyser) { try { analyser.disconnect(); } catch {} analyser = null; }
     if (analyserSpeaker) { try { analyserSpeaker.disconnect(); } catch {} analyserSpeaker = null; }
-    if (processor) { try { processor.disconnect(); } catch {} processor.onaudioprocess = null; processor = null; }
+    if (recorder) { try { if (recorder.state !== 'inactive') recorder.stop(); } catch {} recorder.ondataavailable = null; recorder = null; }
     if (source) { try { if (monitorConnected) source.disconnect(audioCtx.destination); source.disconnect(); } catch {} source = null; }
     if (speakerSource) { try { speakerSource.disconnect(); } catch {} speakerSource = null; }
     if (gainNode) { try { gainNode.disconnect(); } catch {} gainNode = null; }

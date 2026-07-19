@@ -1,70 +1,38 @@
-# Mic → WebSocket → FIFO 使い方
+# Mic → WebSocket → 仮想マイク 使い方
 
-このリポジトリはブラウザからマイク入力を取得し、WebSocket 経由で Node.js サーバーへ送り、サーバー側で FIFO（named pipe）へ書き込む例です。
+このリポジトリはブラウザからマイク入力を取得し、`MediaRecorder`（Opus/WebM）で圧縮しつつ WebSocket 経由で Node.js サーバーへ送り、サーバー側で `ffmpeg` により生の PCM（48000Hz, モノラル, s16le）へデコード・リサンプルした上で `pacat` を使って PulseAudio の仮想マイク（`module-null-sink`）へ再生する例です。
 
 セットアップ手順（Linux）:
 
-1. FIFO を作成します（例）:
-
-```bash
-mkfifo /tmp/audio_fifo
-```
-
-2. 依存をインストールします（`ws`）:
+1. 依存パッケージをインストールします:
 
 ```bash
 # npm または pnpm をお使いください
 npm install ws
+
+# ffmpeg と PulseAudio クライアント（pactl/pacat）が必要です
+sudo apt install ffmpeg pulseaudio-utils
 ```
 
-3. サーバーを起動します:
+2. サーバーを起動します:
 
 ```bash
-AUDIO_FIFO=/tmp/audio_fifo node server.js
+node server.js
 ```
 
-4. ブラウザで開きます:
+起動時にサーバーが仮想マイクシンク（デフォルト名 `virtual_mic`、環境変数 `AUDIO_SINK_NAME` で変更可）を自動作成します。
+
+3. ブラウザで開きます:
 
 http://localhost:8080
 
-5. FIFO の中身を再生する例（サンプルレートはブラウザの AudioContext に依存、多くは 48000）:
+4. マイク（他のアプリ）として `virtual_mic.monitor` を選択すると、ブラウザから送られた音声を利用できます。
 
-```bash
-# aplay を使う（モノラル 16bit PCM, 48000Hz の例）
-aplay -f S16_LE -c1 -r 48000 /tmp/audio_fifo
-
-# ffplay を使う場合
-ffplay -f s16le -ar 48000 -ac 1 /tmp/audio_fifo
-```
+仕組み:
+- クライアントは `MediaRecorder` でマイク入力を Opus/WebM チャンクにエンコードし、WebSocket でサーバーへ送信します。手動での PCM 変換やサンプルレートの手動指定は行いません。
+- サーバーはチャンクを `ffmpeg` の標準入力へ連続してパイプし、`ffmpeg` が固定フォーマット（48000Hz, モノラル, 16bit PCM リトルエンディアン）へデコード・リサンプルします。クライアント側マイクの実際のサンプルレートに関わらず、常にこの固定フォーマットへ変換されるため、フォーマット不一致によるノイズが発生しません。
+- デコード後の PCM は `pacat` へ渡され仮想マイクシンクに再生されると同時に、Speaker モードで接続しているブラウアクライアントへもそのまま配信され、そちらは受信 PCM をそのまま `AudioBufferSourceNode` で再生します。
 
 注意点:
 - ブラウザはセキュアコンテキスト（localhost を含む）で getUserMedia が動作します。
-- 送信されるデータは 16bit リトルエンディアン PCM（モノラル）です。再生側はサンプルレートを合わせてください。
-
-自動で再生コマンドを起動する
--------------------------------------------------
-サーバー起動時に `tail -f` と再生コマンド（`paplay` など）を子プロセスとして自動で起動することができます。これにより別ターミナルで `tail -f` を実行する手間が不要になります。
-
-デフォルトではサーバーは次のコマンドを実行します（必要に応じて環境変数 `AUDIO_CMD` で上書きできます）:
-
-```sh
-tail -f /tmp/audio_fifo | paplay --device=virtual_mic --raw --format=s16ne --rate=48000 --channels=1
-```
-
-起動例:
-
-```bash
-# FIFO を作成
-mkfifo /tmp/audio_fifo
-
-# 必要パッケージをインストール
-npm install ws
-
-# 環境変数でコマンドを変更する例（任意）
-export AUDIO_CMD="tail -f /tmp/audio_fifo | ffplay -f s16le -ar 48000 -ac 1 -"
-
-# サーバーを起動（デフォルトで AUDIO_CMD が実行されます）
-AUDIO_FIFO=/tmp/audio_fifo node server.js
-```
-
-エラー出力はサーバーのログに表示されます。
+- `ffmpeg` と `pacat` が `PATH` 上に無い場合、サーバーは警告を出して音声パイプを起動しません。

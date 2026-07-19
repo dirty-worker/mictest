@@ -4,35 +4,11 @@ const path = require('path');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 8080;
-const FIFO = process.env.AUDIO_FIFO || '/tmp/audio_fifo';
 const { spawnSync, spawn } = require('child_process');
 
-function ensureFifo(path) {
-  if (fs.existsSync(path)) {
-    const stat = fs.statSync(path);
-    if (!stat.isFIFO()) {
-      console.error(`既存パスが FIFO ではありません: ${path}`);
-      process.exit(1);
-    }
-    return;
-  }
-
-  console.log(`FIFO が見つかりません。自動作成します: ${path}`);
-  const result = spawnSync('mkfifo', [path]);
-  if (result.error) {
-    console.error('mkfifo の実行に失敗しました:', result.error);
-    process.exit(1);
-  }
-  if (result.status !== 0) {
-    console.error('mkfifo が非ゼロ終了コードで終了しました:', result.status);
-    console.error(result.stderr.toString());
-    process.exit(1);
-  }
-}
-
-ensureFifo(FIFO);
-
 const AUDIO_SINK_NAME = process.env.AUDIO_SINK_NAME || 'virtual_mic';
+const OUTPUT_SAMPLE_RATE = 48000;
+const OUTPUT_CHANNELS = 1;
 
 function runCmd(cmd, args) {
   const result = spawnSync(cmd, args, { encoding: 'utf8' });
@@ -103,64 +79,62 @@ function createSpeakerMonitor() {
   }
 }
 
-let fifoStream = null;
-let pipeProcess = null;
-let audioPipeSampleRate = 48000;
-let audioPipeChannels = 1;
-
-function openFifoStream() {
-  if (fifoStream) return fifoStream;
-  fifoStream = fs.createWriteStream(FIFO);
-  fifoStream.on('error', (err) => {
-    console.error('FIFO write stream error:', err.message || err);
-    if (fifoStream) { try { fifoStream.destroy(); } catch (e) { /* ignore */ } }
-    fifoStream = null;
-  });
-  return fifoStream;
-}
-
-function closeFifoStream() {
-  if (!fifoStream) return;
-  try { fifoStream.destroy(); } catch (e) { /* ignore */ }
-  fifoStream = null;
-}
+// Incoming mic audio arrives as compressed WebM/Opus chunks (MediaRecorder output).
+// ffmpeg decodes+resamples that stream to a fixed raw PCM format; its stdout is
+// fanned out to (a) pacat, which plays it into the virtual mic sink, and
+// (b) any connected speaker clients, who already expect raw s16le PCM.
+let ffmpegProcess = null;
+let pacatProcess = null;
 
 function startAudioPipe() {
-  if (pipeProcess) return;
-  const rateArg = `--rate=${audioPipeSampleRate}`;
-  const channelsArg = `--channels=${audioPipeChannels}`;
-  if (commandExists('pacat')) {
-    const command = `exec pacat --raw ${channelsArg} ${rateArg} --format=s16le --playback --device='${AUDIO_SINK_NAME}' < '${FIFO}'`;
-    console.log(`Starting audio pipe using pacat (${audioPipeSampleRate}Hz, ${audioPipeChannels}ch)`);
-    pipeProcess = spawn('sh', ['-c', command], { stdio: ['ignore', 'ignore', 'inherit'] });
-  } else if (commandExists('pw-cat')) {
-    const args = ['--playback', '--raw', `--channels=${audioPipeChannels}`, `--rate=${audioPipeSampleRate}`, '--format=s16le', '--target', AUDIO_SINK_NAME, '-'];
-    console.log(`Starting audio pipe using pw-cat (${audioPipeSampleRate}Hz, ${audioPipeChannels}ch)`);
-    const fifoFd = fs.openSync(FIFO, 'r');
-    pipeProcess = spawn('pw-cat', args, { stdio: [fifoFd, 'ignore', 'inherit'] });
-  } else {
-    console.warn('No pw-cat or pacat available; virtual mic audio pipe will not be started.');
+  if (ffmpegProcess) return;
+  if (!commandExists('ffmpeg')) {
+    console.warn('ffmpeg not found; cannot decode incoming mic audio.');
     return;
   }
-  pipeProcess.on('exit', (code, signal) => {
-    console.log(`Audio pipe process exited (${signal || code})`);
-    pipeProcess = null;
+  if (!commandExists('pacat')) {
+    console.warn('pacat not found; virtual mic audio pipe will not be started.');
+    return;
+  }
+
+  console.log(`Starting audio pipe: ffmpeg (webm/opus -> s16le ${OUTPUT_SAMPLE_RATE}Hz ${OUTPUT_CHANNELS}ch) -> pacat`);
+  ffmpegProcess = spawn('ffmpeg', [
+    '-loglevel', 'error',
+    '-f', 'webm',
+    '-i', 'pipe:0',
+    '-f', 's16le',
+    '-ar', String(OUTPUT_SAMPLE_RATE),
+    '-ac', String(OUTPUT_CHANNELS),
+    'pipe:1',
+  ], { stdio: ['pipe', 'pipe', 'inherit'] });
+
+  pacatProcess = spawn('pacat', [
+    '--raw',
+    `--channels=${OUTPUT_CHANNELS}`,
+    `--rate=${OUTPUT_SAMPLE_RATE}`,
+    '--format=s16le',
+    '--playback',
+    `--device=${AUDIO_SINK_NAME}`,
+  ], { stdio: ['pipe', 'ignore', 'inherit'] });
+
+  ffmpegProcess.stdout.on('data', (chunk) => {
+    if (pacatProcess && pacatProcess.stdin.writable) pacatProcess.stdin.write(chunk);
+    broadcastSpeaker(chunk);
   });
-  pipeProcess.on('error', (err) => {
-    console.warn('Audio pipe process failed:', err.message || err);
-    pipeProcess = null;
-  });
+
+  const onExit = (label) => (code, signal) => {
+    console.log(`${label} exited (${signal || code})`);
+    stopAudioPipe();
+  };
+  ffmpegProcess.on('exit', onExit('ffmpeg'));
+  ffmpegProcess.on('error', (err) => { console.warn('ffmpeg failed:', err.message || err); stopAudioPipe(); });
+  pacatProcess.on('exit', onExit('pacat'));
+  pacatProcess.on('error', (err) => { console.warn('pacat failed:', err.message || err); stopAudioPipe(); });
 }
 
 function stopAudioPipe() {
-  closeFifoStream();
-  if (!pipeProcess) return;
-  try {
-    pipeProcess.kill('SIGTERM');
-  } catch (e) {
-    console.warn('Failed to stop audio pipe process:', e.message || e);
-  }
-  pipeProcess = null;
+  if (ffmpegProcess) { try { ffmpegProcess.kill('SIGTERM'); } catch (e) { /* ignore */ } ffmpegProcess = null; }
+  if (pacatProcess) { try { pacatProcess.kill('SIGTERM'); } catch (e) { /* ignore */ } pacatProcess = null; }
 }
 
 function cleanupOnExit() {
@@ -197,8 +171,8 @@ function broadcastSpeaker(data, excludeWs = null) {
 function broadcastFormat() {
   const format = {
     action: 'format',
-    sampleRate: audioPipeSampleRate,
-    channels: audioPipeChannels,
+    sampleRate: OUTPUT_SAMPLE_RATE,
+    channels: OUTPUT_CHANNELS,
   };
   for (const ws of speakerClients) {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(format));
@@ -233,16 +207,8 @@ wss.on('connection', (ws, req) => {
   const roles = { mic: false, speaker: false };
   let registered = false;
 
-  function registerRoles(roleNames, sampleRate, channels) {
+  function registerRoles(roleNames) {
     const list = Array.isArray(roleNames) ? roleNames : [roleNames];
-    const rateChanged = typeof sampleRate === 'number' && sampleRate > 0 && sampleRate !== audioPipeSampleRate;
-    const channelsChanged = typeof channels === 'number' && channels > 0 && channels !== audioPipeChannels;
-    if (rateChanged) {
-      audioPipeSampleRate = sampleRate;
-    }
-    if (channelsChanged) {
-      audioPipeChannels = channels;
-    }
     list.forEach((role) => {
       if (role === 'speaker' && !roles.speaker) {
         roles.speaker = true;
@@ -255,11 +221,7 @@ wss.on('connection', (ws, req) => {
       }
     });
     registered = true;
-    if (roles.mic && (rateChanged || channelsChanged) && pipeProcess) {
-      console.log(`Audio format changed (${audioPipeSampleRate}Hz, ${audioPipeChannels}ch); restarting audio pipe`);
-      stopAudioPipe();
-    }
-    if (roles.mic && !pipeProcess) {
+    if (roles.mic && !ffmpegProcess) {
       startAudioPipe();
     }
     if (speakerClients.size > 0) {
@@ -274,7 +236,7 @@ wss.on('connection', (ws, req) => {
       try {
         const data = JSON.parse(text);
         if (data && data.action === 'register' && Array.isArray(data.roles)) {
-          registerRoles(data.roles, data.sampleRate, data.channels);
+          registerRoles(data.roles);
           return;
         }
       } catch (e) {
@@ -294,8 +256,7 @@ wss.on('connection', (ws, req) => {
 
     if (roles.mic) {
       if (!Buffer.isBuffer(message)) message = Buffer.from(message);
-      openFifoStream().write(message);
-      broadcastSpeaker(message, ws);
+      if (ffmpegProcess && ffmpegProcess.stdin.writable) ffmpegProcess.stdin.write(message);
     }
   });
 
@@ -321,7 +282,6 @@ server.on('error', (err) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`HTTP+WS server listening on all interfaces at http://0.0.0.0:${PORT}`);
   console.log(`Use this machine IP to connect from other devices: http://<your-ip>:${PORT}`);
-  console.log(`Writing audio data to FIFO: ${FIFO}`);
   createVirtualSink();
   createSpeakerMonitor();
 });
