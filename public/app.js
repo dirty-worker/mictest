@@ -9,10 +9,14 @@
   const volumeValue = document.getElementById('volumeValue');
   const canvas = document.getElementById('viz');
   const ctx = canvas.getContext('2d');
+  const speakerCanvas = document.getElementById('vizSpeaker');
+  const speakerCtx = speakerCanvas.getContext('2d');
+  const speakerPlaybackCheckbox = document.getElementById('speakerPlayback');
   const requestPermBtn = document.getElementById('requestPerm');
   const permStatus = document.getElementById('permStatus');
   let audioCtx, processor, source, stream, ws, analyser, gainNode, drawId, monitorConnected = false;
   let speakerSource;
+  let analyserSpeaker, speakerDrawId;
   let incomingSampleRate = null;
   let incomingChannels = 1;
 
@@ -127,7 +131,34 @@
           if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
           gainNode = audioCtx.createGain();
           gainNode.gain.value = parseFloat(volumeInput.value);
-          gainNode.connect(audioCtx.destination);
+          analyserSpeaker = audioCtx.createAnalyser();
+          analyserSpeaker.fftSize = 2048;
+          analyserSpeaker.connect(gainNode);
+          if (speakerPlaybackCheckbox.checked) gainNode.connect(audioCtx.destination);
+
+          const speakerBufferLength = analyserSpeaker.fftSize;
+          const speakerDataArray = new Uint8Array(speakerBufferLength);
+          function drawSpeaker() {
+            speakerDrawId = requestAnimationFrame(drawSpeaker);
+            analyserSpeaker.getByteTimeDomainData(speakerDataArray);
+            speakerCtx.fillStyle = 'white';
+            speakerCtx.fillRect(0, 0, speakerCanvas.width, speakerCanvas.height);
+            speakerCtx.lineWidth = 2;
+            speakerCtx.strokeStyle = '#cc7a00';
+            speakerCtx.beginPath();
+            const sliceWidth = speakerCanvas.width / speakerBufferLength;
+            let sx = 0;
+            for (let i = 0; i < speakerBufferLength; i++) {
+              const v = speakerDataArray[i] / 128.0;
+              const y = (v * speakerCanvas.height) / 2;
+              if (i === 0) speakerCtx.moveTo(sx, y);
+              else speakerCtx.lineTo(sx, y);
+              sx += sliceWidth;
+            }
+            speakerCtx.lineTo(speakerCanvas.width, speakerCanvas.height / 2);
+            speakerCtx.stroke();
+          }
+          drawSpeaker();
 
           let sourceNode = null;
 
@@ -160,7 +191,7 @@
             const buffer = audioCtx.createBuffer(1, float32.length, sampleRate);
             buffer.copyToChannel(float32, 0);
             sourceNode.buffer = buffer;
-            sourceNode.connect(gainNode);
+            sourceNode.connect(analyserSpeaker);
             sourceNode.start();
             sourceNode.onended = () => { sourceNode = null; };
           };
@@ -239,10 +270,13 @@
 
   stopBtn.onclick = () => {
     if (drawId) { cancelAnimationFrame(drawId); drawId = null; }
+    if (speakerDrawId) { cancelAnimationFrame(speakerDrawId); speakerDrawId = null; }
     if (analyser) { try { analyser.disconnect(); } catch {} analyser = null; }
+    if (analyserSpeaker) { try { analyserSpeaker.disconnect(); } catch {} analyserSpeaker = null; }
     if (processor) { try { processor.disconnect(); } catch {} processor.onaudioprocess = null; processor = null; }
     if (source) { try { if (monitorConnected) source.disconnect(audioCtx.destination); source.disconnect(); } catch {} source = null; }
     if (speakerSource) { try { speakerSource.disconnect(); } catch {} speakerSource = null; }
+    if (gainNode) { try { gainNode.disconnect(); } catch {} gainNode = null; }
     if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; }
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     if (ws && ws.readyState === WebSocket.OPEN) ws.close();
@@ -254,6 +288,16 @@
   // マイク選択変更時、録音中なら再起動
   micSelect.addEventListener('change', () => {
     if (stream) { stopBtn.onclick(); startBtn.click(); }
+  });
+
+  // 受信音声の再生トグル（可視化は継続する）
+  speakerPlaybackCheckbox.addEventListener('change', () => {
+    if (!audioCtx || !gainNode) return;
+    if (speakerPlaybackCheckbox.checked) {
+      try { gainNode.connect(audioCtx.destination); } catch (e) { console.warn(e); }
+    } else {
+      try { gainNode.disconnect(audioCtx.destination); } catch (e) { /* ignore */ }
+    }
   });
 
   // Emit トグルでモニターON/OFF
