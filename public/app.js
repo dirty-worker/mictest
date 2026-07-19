@@ -4,11 +4,13 @@
   const stopBtn = document.getElementById('stop');
   const micSelect = document.getElementById('micSelect');
   const emitCheckbox = document.getElementById('emit');
+  const volumeInput = document.getElementById('volume');
+  const volumeValue = document.getElementById('volumeValue');
   const canvas = document.getElementById('viz');
   const ctx = canvas.getContext('2d');
   const requestPermBtn = document.getElementById('requestPerm');
   const permStatus = document.getElementById('permStatus');
-  let audioCtx, processor, source, stream, ws, analyser, drawId, monitorConnected = false;
+  let audioCtx, processor, source, stream, ws, analyser, gainNode, drawId, monitorConnected = false;
 
   function floatTo16BitPCM(float32Array) {
     const l = float32Array.length;
@@ -88,6 +90,11 @@
   }
 
   requestPermBtn.addEventListener('click', requestMicrophonePermission);
+  volumeInput.addEventListener('input', () => {
+    const value = parseFloat(volumeInput.value);
+    volumeValue.textContent = value.toFixed(2);
+    if (gainNode) gainNode.gain.value = value;
+  });
   updatePermissionStatus();
 
   startBtn.onclick = async () => {
@@ -103,10 +110,13 @@
         stream = await getUserMediaCompat(constraints);
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         source = audioCtx.createMediaStreamSource(stream);
+        gainNode = audioCtx.createGain();
+        gainNode.gain.value = parseFloat(volumeInput.value);
 
         analyser = audioCtx.createAnalyser();
         analyser.fftSize = 2048;
         source.connect(analyser);
+        source.connect(gainNode);
 
         processor = audioCtx.createScriptProcessor(4096, 1, 1);
         processor.onaudioprocess = (e) => {
@@ -120,7 +130,7 @@
 
         // モニター（ローカル再生）の切替
         if (emitCheckbox.checked) {
-          try { source.connect(audioCtx.destination); monitorConnected = true; } catch (e) { console.warn(e); }
+          try { gainNode.connect(audioCtx.destination); monitorConnected = true; } catch (e) { console.warn(e); }
         }
 
         // 可視化ループ
