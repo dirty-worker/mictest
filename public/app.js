@@ -6,6 +6,8 @@
   const emitCheckbox = document.getElementById('emit');
   const canvas = document.getElementById('viz');
   const ctx = canvas.getContext('2d');
+  const requestPermBtn = document.getElementById('requestPerm');
+  const permStatus = document.getElementById('permStatus');
   let audioCtx, processor, source, stream, ws, analyser, drawId, monitorConnected = false;
 
   function floatTo16BitPCM(float32Array) {
@@ -26,7 +28,7 @@
 
   async function enumerateInputs() {
     try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
+      const devices = navigator.mediaDevices && navigator.mediaDevices.enumerateDevices ? await navigator.mediaDevices.enumerateDevices() : [];
       const inputs = devices.filter(d => d.kind === 'audioinput');
       micSelect.innerHTML = '';
       inputs.forEach((d) => {
@@ -48,6 +50,46 @@
   // 初回列挙
   enumerateInputs();
 
+  async function updatePermissionStatus() {
+    try {
+      if (!navigator.permissions) { permStatus.textContent = '権限: 不明 (Permissions API 未対応)'; return; }
+      const status = await navigator.permissions.query({ name: 'microphone' });
+      permStatus.textContent = '権限: ' + status.state;
+      status.onchange = () => { permStatus.textContent = '権限: ' + status.state; };
+    } catch (e) {
+      permStatus.textContent = '権限: 確認不可';
+    }
+  }
+
+  function hasGetUserMedia() {
+    return !!((navigator.mediaDevices && navigator.mediaDevices.getUserMedia) || navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia);
+  }
+
+  function getUserMediaCompat(constraints) {
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      return navigator.mediaDevices.getUserMedia(constraints);
+    }
+    const getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+    if (!getUserMedia) return Promise.reject(new Error('getUserMedia is not implemented in this browser'));
+    return new Promise((resolve, reject) => getUserMedia.call(navigator, constraints, resolve, reject));
+  }
+
+  async function requestMicrophonePermission() {
+    try {
+      if (!hasGetUserMedia()) throw new Error('getUserMedia not supported');
+      await getUserMediaCompat({ audio: true });
+      await enumerateInputs();
+      updatePermissionStatus();
+      status.textContent = 'マイク権限が付与されました';
+    } catch (e) {
+      status.textContent = 'マイク権限が拒否されました';
+      console.warn('getUserMedia denied', e);
+    }
+  }
+
+  requestPermBtn.addEventListener('click', requestMicrophonePermission);
+  updatePermissionStatus();
+
   startBtn.onclick = async () => {
     try {
       ws = new WebSocket(getWsUrl());
@@ -57,7 +99,8 @@
         const constraints = { audio: {} };
         const deviceId = micSelect.value;
         if (deviceId) constraints.audio.deviceId = { exact: deviceId };
-        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (!hasGetUserMedia()) throw new Error('getUserMedia not supported in this browser / context');
+        stream = await getUserMediaCompat(constraints);
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         source = audioCtx.createMediaStreamSource(stream);
 

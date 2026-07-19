@@ -9,6 +9,10 @@
   <body>
     <h1>マイク入力を送信</h1>
     <p id="status">準備完了</p>
+    <div style="margin-top:8px">
+      <button id="requestPerm">マイク権限を要求</button>
+      <span id="permStatus" style="margin-left:8px">権限: 不明</span>
+    </div>
 
     <label>入力デバイス: <select id="micSelect"></select></label>
     <label style="margin-left:12px"><input type="checkbox" id="emit" /> ローカル再生（Emit voice）</label>
